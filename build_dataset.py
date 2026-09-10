@@ -1,0 +1,131 @@
+import yaml
+import pickle
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+
+mimic_dir = "./"
+admissionFile = mimic_dir + "ADMISSIONS.csv"
+diagnosisFile = mimic_dir + "DIAGNOSES_ICD.csv"
+
+print("Loading CSVs Into Dataframes")
+admissionDf = pd.read_csv(admissionFile, dtype=str)
+admissionDf['ADMITTIME'] = pd.to_datetime(admissionDf['ADMITTIME']) #covert column into python datetime
+admissionDf = admissionDf.sort_values('ADMITTIME') #oldest to newest
+admissionDf = admissionDf.reset_index(drop=True) 
+diagnosisDf = pd.read_csv(diagnosisFile, dtype=str).set_index("HADM_ID")
+diagnosisDf = diagnosisDf[diagnosisDf['ICD9_CODE'].notnull()] #remove diagnoses without an ICD9_Code
+diagnosisDf = diagnosisDf[['ICD9_CODE']]
+
+print("Building Dataset")
+data = {}
+#tqdm adds a progression bar
+for row in tqdm(admissionDf.itertuples(), total=admissionDf.shape[0]):          
+    #Extracting Admissions Table Info
+    hadm_id = row.HADM_ID
+    subject_id = row.SUBJECT_ID
+            
+    # Extracting the Diagnoses
+    if hadm_id in diagnosisDf.index: 
+        diagnoses = list(set(diagnosisDf.loc[[hadm_id]]["ICD9_CODE"])) #get all ICD9 diagnosis code for this hospital admission
+    else:
+        diagnoses = []
+    
+    # Building the hospital admission data point
+    if subject_id not in data:
+      data[subject_id] = {'visits': [diagnoses]} #create initial visit (new patient)
+    else:
+      data[subject_id]['visits'].append(diagnoses) #add subsequent visits (same patient)
+
+code_to_index = {} #dictionary
+
+#all_codes = list(set([c for p in data.values() for v in p['visits'] for c in v])) commenting out for readability
+
+all_codes = []
+
+for patient in data.values():
+    for visit in patient['visits']:
+        for code in visit:
+            all_codes.append(code)
+
+all_codes = list(set(all_codes)) #remove duplicate codes and turn into a list
+
+np.random.shuffle(all_codes)
+for c in all_codes:
+    code_to_index[c] = len(code_to_index) #give each code a number
+print(f"VOCAB SIZE: {len(code_to_index)}")
+
+#reverse dictionary to show index, codex
+index_to_code = {v: k for k, v in code_to_index.items()}
+
+data = list(data.values()) #removes subject ids 
+
+print("Adding Labels")
+with open("hcup_ccs_2015_definitions_benchmark.yaml") as definitions_file:
+    definitions = yaml.full_load(definitions_file)
+
+code_to_group = {} # Associates code to a group
+for group in definitions:
+  if definitions[group]['use_in_benchmark'] == False:
+      continue
+  codes = definitions[group]['codes']
+  for code in codes:
+      if code not in code_to_group:
+        code_to_group[code] = group
+      else:
+        assert code_to_group[code] == group #checks for  conflicts 
+
+#creates sorted list of bench mark groups, position in the list is their id
+id_to_group = sorted([
+  k for k in definitions.keys() 
+  if definitions[k]['use_in_benchmark'] ==  True]
+  )
+ 
+#create dictionary with benchmark group: id 
+group_to_id = dict((x, i) for (i, x) in enumerate(id_to_group))
+
+# Add Labels
+for p in data:
+  label = np.zeros(len(group_to_id))
+  for v in p['visits']:
+    for c in v:
+      if c in code_to_group:
+        label[group_to_id[code_to_group[c]]] = 1
+  
+  p['labels'] = label
+
+#covert visits to no longer use ICD9_Code but numberical codes
+print("Converting Visits")
+for p in data:
+    new_visits = []
+    for v in p['visits']:
+        new_visit = []
+        for c in v:
+            new_visit.append(code_to_index[c])
+                
+        new_visits.append((list(set(new_visit)))) #removes duplicates (codes that appear more than once in the same hospital visit)
+        
+    p['visits'] = new_visits    
+
+print(f"MAX LEN: {max([len(p['visits']) for p in data])}")
+print(f"AVG LEN: {np.mean([len(p['visits']) for p in data])}")
+print(f"MAX VISIT LEN: {max([len(v) for p in data for v in p['visits']])}")
+print(f"AVG VISIT LEN: {np.mean([len(v) for p in data for v in p['visits']])}")
+print(f"NUM RECORDS: {len(data)}")
+print(f"NUM LONGITUDINAL RECORDS: {len([p for p in data if len(p['visits']) > 1])}")
+
+# Train-Val-Test Split
+print("Splitting Datasets")
+train_dataset, test_dataset = train_test_split(data, test_size=0.2, random_state=4, shuffle=True) # 80 20 
+train_dataset, val_dataset = train_test_split(train_dataset, test_size=0.1, random_state=4, shuffle=True) #90 10 
+
+# Save Everything
+print("Saving Everything")
+print(len(index_to_code))
+pickle.dump(code_to_index, open("./codeToIndex.pkl", "wb"))
+pickle.dump(index_to_code, open("./indexToCode.pkl", "wb"))
+pickle.dump(id_to_group, open("./idToLabel.pkl", "wb"))
+pickle.dump(train_dataset, open("./trainDataset.pkl", "wb"))
+pickle.dump(val_dataset, open("./valDataset.pkl", "wb"))
+pickle.dump(test_dataset, open("./testDataset.pkl", "wb"))
