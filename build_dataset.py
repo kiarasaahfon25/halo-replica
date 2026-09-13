@@ -5,18 +5,27 @@ import pandas as pd
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 
-mimic_dir = "./"
+mimic_dir = "data/"
 admissionFile = mimic_dir + "ADMISSIONS.csv"
 diagnosisFile = mimic_dir + "DIAGNOSES_ICD.csv"
 
 print("Loading CSVs Into Dataframes")
 admissionDf = pd.read_csv(admissionFile, dtype=str)
+
 admissionDf['ADMITTIME'] = pd.to_datetime(admissionDf['ADMITTIME']) #covert column into python datetime
 admissionDf = admissionDf.sort_values('ADMITTIME') #oldest to newest
 admissionDf = admissionDf.reset_index(drop=True) 
 diagnosisDf = pd.read_csv(diagnosisFile, dtype=str).set_index("HADM_ID")
 diagnosisDf = diagnosisDf[diagnosisDf['ICD9_CODE'].notnull()] #remove diagnoses without an ICD9_Code
 diagnosisDf = diagnosisDf[['ICD9_CODE']]
+
+
+#limiting records for easier run on laptop
+admissionDf = admissionDf.head(1000)
+
+diagnosisDf = diagnosisDf[
+    diagnosisDf.index.isin(admissionDf['HADM_ID'])
+]
 
 print("Building Dataset")
 data = {}
@@ -123,9 +132,9 @@ train_dataset, val_dataset = train_test_split(train_dataset, test_size=0.1, rand
 # Save Everything
 print("Saving Everything")
 print(len(index_to_code))
-pickle.dump(code_to_index, open("./codeToIndex.pkl", "wb"))
-pickle.dump(index_to_code, open("./indexToCode.pkl", "wb"))
-pickle.dump(id_to_group, open("./idToLabel.pkl", "wb"))
-pickle.dump(train_dataset, open("./trainDataset.pkl", "wb"))
-pickle.dump(val_dataset, open("./valDataset.pkl", "wb"))
-pickle.dump(test_dataset, open("./testDataset.pkl", "wb"))
+pickle.dump(code_to_index, open("./data/codeToIndex.pkl", "wb"))
+pickle.dump(index_to_code, open("./data/indexToCode.pkl", "wb"))
+pickle.dump(id_to_group, open("./data/idToLabel.pkl", "wb"))
+pickle.dump(train_dataset, open("./data/trainDataset.pkl", "wb"))
+pickle.dump(val_dataset, open("./data/valDataset.pkl", "wb"))
+pickle.dump(test_dataset, open("./data/testDataset.pkl", "wb"))
