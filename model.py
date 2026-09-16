@@ -236,10 +236,13 @@ class HALOModel(nn.Module):
         
         return code_probs
     
-    '''Loss note
-       if there are 1000 records, HALO makes a prediction for the 1000 codes and calculates the loss for the 1000 codes'''
+    '''Loss note (happens at the end when code has already been produced)
+       Binary cross entropy 
+       if there are 1000 codes, HALO makes a prediction for the 1000 codes and calculates the loss for the 1000 codes'''
+        #gets sent back through back propogation 
     
-    #use trained model to generate codes
+    #use trained model to generate codes, occurs for each visit
+    '''"For each possible code, HALO predicts a probability, then we sample whether that code appears in the synthetic visit based on that probability."'''
     def sample(self, input_visits, random=True):
         sig = nn.Sigmoid()
         hidden_states = self.transformer(input_visits)

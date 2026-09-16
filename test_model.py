@@ -75,7 +75,7 @@ def conf_mat(x, y):
 model = HALOModel(config).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
 
-checkpoint = torch.load('./save/halo_model2', map_location=torch.device(device))
+checkpoint = torch.load('./save/halo_model', map_location=torch.device(device))
 model.load_state_dict(checkpoint['model'])
 optimizer.load_state_dict(checkpoint['optimizer'])
 
