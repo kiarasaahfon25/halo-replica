@@ -39,7 +39,7 @@ class HALOConfig(object):
             initializer_range=0.02, #weight initialization
             batch_size=48,
             sample_batch_size=256,
-            epoch=50,
+            epoch=5, #original was 50, reducing for tests
             pos_loss_weight=None,  #controls if positive examples are given more weight
             lr=1e-4,
     ):
