@@ -12,19 +12,19 @@ diagnosisFile = mimic_dir + "DIAGNOSES_ICD.csv.gz"
 print("Loading CSVs Into Dataframes")
 admissionDf = pd.read_csv(admissionFile, dtype=str)
 
-admissionDf['ADMITTIME'] = pd.to_datetime(admissionDf['ADMITTIME']) #covert column into python datetime
-admissionDf = admissionDf.sort_values('ADMITTIME') #oldest to newest
+admissionDf['admittime'] = pd.to_datetime(admissionDf['admittime']) #covert column into python datetime
+admissionDf = admissionDf.sort_values('admittime') #oldest to newest
 admissionDf = admissionDf.reset_index(drop=True) 
-diagnosisDf = pd.read_csv(diagnosisFile, dtype=str).set_index("HADM_ID")
-diagnosisDf = diagnosisDf[diagnosisDf['ICD9_CODE'].notnull()] #remove diagnoses without an ICD9_Code
-diagnosisDf = diagnosisDf[['ICD9_CODE']]
+diagnosisDf = pd.read_csv(diagnosisFile, dtype=str).set_index("hadm_id")
+diagnosisDf = diagnosisDf[diagnosisDf['icd9_code'].notnull()] #remove diagnoses without an ICD9_Code
+diagnosisDf = diagnosisDf[['icd9_code']]
 
 
 #limiting records for easier run on laptop
 admissionDf = admissionDf.head(1000)
 
 diagnosisDf = diagnosisDf[
-    diagnosisDf.index.isin(admissionDf['HADM_ID'])
+    diagnosisDf.index.isin(admissionDf['hadm_id'])
 ]
 
 print("Building Dataset")
@@ -32,12 +32,12 @@ data = {}
 #tqdm adds a progression bar
 for row in tqdm(admissionDf.itertuples(), total=admissionDf.shape[0]):          
     #Extracting Admissions Table Info
-    hadm_id = row.HADM_ID
-    subject_id = row.SUBJECT_ID
+    hadm_id = row.hadm_id
+    subject_id = row.subject_id
             
     # Extracting the Diagnoses
     if hadm_id in diagnosisDf.index: 
-        diagnoses = list(set(diagnosisDf.loc[[hadm_id]]["ICD9_CODE"])) #get all ICD9 diagnosis code for this hospital admission
+        diagnoses = list(set(diagnosisDf.loc[[hadm_id]]["icd9_code"])) #get all ICD9 diagnosis code for this hospital admission
     else:
         diagnoses = []
     
