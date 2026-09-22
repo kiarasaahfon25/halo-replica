@@ -5,9 +5,9 @@ import pandas as pd
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 
-mimic_dir = "data/"
-admissionFile = mimic_dir + "ADMISSIONS.csv"
-diagnosisFile = mimic_dir + "DIAGNOSES_ICD.csv"
+mimic_dir = "/fs02/datasets/MIMIC-III/physionet.org/files/mimic3-carevue/1.4/"
+admissionFile = mimic_dir + "ADMISSIONS.csv.gz"
+diagnosisFile = mimic_dir + "DIAGNOSES_ICD.csv.gz"
 
 print("Loading CSVs Into Dataframes")
 admissionDf = pd.read_csv(admissionFile, dtype=str)
