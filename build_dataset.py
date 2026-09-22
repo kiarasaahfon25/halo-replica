@@ -21,7 +21,7 @@ diagnosisDf = diagnosisDf[['icd9_code']]
 
 
 #limiting records for easier run on laptop
-admissionDf = admissionDf.head(1000)
+admissionDf = admissionDf.head(20000)
 
 diagnosisDf = diagnosisDf[
     diagnosisDf.index.isin(admissionDf['hadm_id'])
