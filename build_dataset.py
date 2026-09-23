@@ -19,13 +19,13 @@ diagnosisDf = pd.read_csv(diagnosisFile, dtype=str).set_index("hadm_id")
 diagnosisDf = diagnosisDf[diagnosisDf['icd9_code'].notnull()] #remove diagnoses without an ICD9_Code
 diagnosisDf = diagnosisDf[['icd9_code']]
 
-
+'''
 #limiting records for easier run on laptop
-admissionDf = admissionDf.head(20000)
+admissionDf = admissionDf.head()
 
 diagnosisDf = diagnosisDf[
     diagnosisDf.index.isin(admissionDf['hadm_id'])
-]
+]'''
 
 print("Building Dataset")
 data = {}
