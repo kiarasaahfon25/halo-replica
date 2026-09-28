@@ -6,7 +6,6 @@ import pickle
 from tqdm import tqdm
 from model import HALOModel
 from config import HALOConfig
-import matplotlib.pyplot as plt
 
 
 # Set random seeds for reproducible training
@@ -77,10 +76,15 @@ if os.path.exists("./save/halo_model"):
 
 # Train HALO and periodically evaluate on the validation dataset
 global_loss = 1e10
+train_losses = []
 val_losses = []
 
 for e in tqdm(range(config.epoch)):
   shuffle_training_data(train_ehr_dataset)
+  epoch_train_loss = 0
+  num_batches = 0
+  epoch_val_loss = None
+
   for i in range(0, len(train_ehr_dataset), config.batch_size):
     model.train()
     
@@ -90,12 +94,15 @@ for e in tqdm(range(config.epoch)):
     
     optimizer.zero_grad()
     loss, _, _ = model(batch_ehr, position_ids=None, ehr_labels=batch_ehr, ehr_masks=batch_mask, pos_loss_weight=config.pos_loss_weight)
+    epoch_train_loss += loss.item()
+    num_batches += 1
+
     loss.backward()
     optimizer.step()
     
-    if i % (10*config.batch_size) == 0: #500
+    if i % (500*config.batch_size) == 0: #500
       print("Epoch %d, Iter %d: Training Loss:%.6f"%(e, i, loss * 8))
-    if i % (10*config.batch_size) == 0:
+    if i % (500*config.batch_size) == 0:
       if i == 0:
         continue
     
@@ -111,8 +118,9 @@ for e in tqdm(range(config.epoch)):
           val_l.append((val_loss).cpu().detach().numpy())
           
         cur_val_loss = np.mean(val_l)
+        epoch_val_loss = cur_val_loss
+
         print("Epoch %d Validation Loss:%.7f"%(e, cur_val_loss))
-        val_losses.append(cur_val_loss)
 
         # Save the model when validation loss improves
         if cur_val_loss < global_loss:
@@ -125,8 +133,15 @@ for e in tqdm(range(config.epoch)):
           torch.save(state, './save/halo_model')
           print('\n------------ Save best model ------------\n')
           
-          plt.plot(range(1, len(val_losses) + 1), val_losses)
-          plt.xlabel("Validation Check")
-          plt.ylabel("Validation Loss")
-          plt.title("HALO Validation Loss")
-          plt.show()
+         
+  avg_train_loss = epoch_train_loss / num_batches
+  train_losses.append(avg_train_loss)
+
+  if epoch_val_loss is not None:
+    val_losses.append(epoch_val_loss)
+
+with open('./save/losses.pkl', 'wb') as f:
+  pickle.dump({
+    'train_losses': train_losses,
+    'val_losses': val_losses
+  }, f)
