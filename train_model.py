@@ -6,6 +6,8 @@ import pickle
 from tqdm import tqdm
 from model import HALOModel
 from config import HALOConfig
+import matplotlib.pyplot as plt
+
 
 # Set random seeds for reproducible training
 SEED = 4
@@ -75,6 +77,8 @@ if os.path.exists("./save/halo_model"):
 
 # Train HALO and periodically evaluate on the validation dataset
 global_loss = 1e10
+val_losses = []
+
 for e in tqdm(range(config.epoch)):
   shuffle_training_data(train_ehr_dataset)
   for i in range(0, len(train_ehr_dataset), config.batch_size):
@@ -108,6 +112,7 @@ for e in tqdm(range(config.epoch)):
           
         cur_val_loss = np.mean(val_l)
         print("Epoch %d Validation Loss:%.7f"%(e, cur_val_loss))
+        val_losses.append(cur_val_loss)
 
         # Save the model when validation loss improves
         if cur_val_loss < global_loss:
@@ -119,3 +124,9 @@ for e in tqdm(range(config.epoch)):
             }
           torch.save(state, './save/halo_model')
           print('\n------------ Save best model ------------\n')
+          
+          plt.plot(range(1, len(val_losses) + 1), val_losses)
+          plt.xlabel("Validation Check")
+          plt.ylabel("Validation Loss")
+          plt.title("HALO Validation Loss")
+          plt.show()
