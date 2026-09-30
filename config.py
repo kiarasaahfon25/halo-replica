@@ -27,7 +27,7 @@ class HALOConfig(object):
     def __init__(
             self,
             total_vocab_size=6869, 
-            code_vocab_size=5053,   #medical codes to choose from original was 6841
+            code_vocab_size=6841,   #medical codes to choose from original was 6841
             label_vocab_size=25,    #label codes to choose from
             special_vocab_size=3,   #start code, end code, pad code
             n_positions=56,  #56 positions available in the sequence
