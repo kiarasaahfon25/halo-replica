@@ -46,6 +46,10 @@ train_ehr_dataset = pickle.load(open('./data/trainDataset.pkl', 'rb'))
 val_ehr_dataset = pickle.load(open('./data/valDataset.pkl', 'rb'))
 test_ehr_dataset = pickle.load(open('./data/testDataset.pkl', 'rb'))
 halo_ehr_dataset = pickle.load(open('./results/datasets/haloDataset.pkl', 'rb'))
+halo_ehr_dataset = [
+    p for p in halo_ehr_dataset
+    if len(p['visits']) > 0
+]
 
 
 class DiagnosisModel(nn.Module):
