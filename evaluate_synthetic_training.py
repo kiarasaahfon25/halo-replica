@@ -1,754 +1,534 @@
-import os
+import torch
 import pickle
 import random
-
+import itertools
 import numpy as np
-import torch
+from tqdm import tqdm
 import torch.nn as nn
-import torch.optim as optim
-
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    f1_score
-)
-
-import config
-
-
-# ============================================================
-# Configuration
-# ============================================================
-
-DATA_DIR = "./data"
-
-TRAIN_FILE = os.path.join(DATA_DIR, "trainDataset.pkl")
-VAL_FILE = os.path.join(DATA_DIR, "valDataset.pkl")
-TEST_FILE = os.path.join(DATA_DIR, "testDataset.pkl")
-HALO_FILE = "./results/datasets/haloDataset.pkl"
-
-NUM_LABELS = 25
-
-NUM_EPOCHS = 25
-BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
-
-print(f"Using device: {DEVICE}")
-
-
-# ============================================================
-# Reproducibility
-# ============================================================
+from sklearn import metrics
+import matplotlib.pyplot as plt
+from config import HALOConfig
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 SEED = 4
-
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
+LR = 0.001
+EPOCHS = 25
+LABEL_IDX_LIST = list(range(25))
+BATCH_SIZE = 512
+LSTM_HIDDEN_DIM = 32
+EMBEDDING_DIM = 64
+NUM_TRAIN_EXAMPLES = 5000
+NUM_TEST_EXAMPLES = 1000
+NUM_VAL_EXAMPLES = 500
 
+local_rank = -1
+fp16 = False
+if local_rank == -1:
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  n_gpu = torch.cuda.device_count()
+else:
+  torch.cuda.set_device(local_rank)
+  device = torch.device("cuda", local_rank)
+  n_gpu = 1
+  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+  torch.distributed.init_process_group(backend='nccl')
 if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
+  torch.cuda.manual_seed_all(SEED)
 
+# Add the labels to the index_to_code mapping
+index_to_code = pickle.load(open("./data/idToLabel.pkl", "rb"))
 
-# ============================================================
-# Load Datasets
-# ============================================================
+config = HALOConfig()
+train_ehr_dataset = pickle.load(open('./data/trainDataset.pkl', 'rb'))
+val_ehr_dataset = pickle.load(open('./data/valDataset.pkl', 'rb'))
+test_ehr_dataset = pickle.load(open('./data/testDataset.pkl', 'rb'))
+halo_ehr_dataset = pickle.load(open('./results/datasets/haloDataset.pkl', 'rb'))
 
-print("Loading datasets...")
-
-with open(TRAIN_FILE, "rb") as f:
-    train_dataset = pickle.load(f)
-
-with open(VAL_FILE, "rb") as f:
-    val_dataset = pickle.load(f)
-
-with open(TEST_FILE, "rb") as f:
-    test_dataset = pickle.load(f)
-
-with open(HALO_FILE, "rb") as f:
-    halo_dataset = pickle.load(f)
-
-print(f"Real training records: {len(train_dataset)}")
-print(f"Validation records: {len(val_dataset)}")
-print(f"Test records: {len(test_dataset)}")
-print(f"HALO synthetic records: {len(halo_dataset)}")
-
-
-# ============================================================
-# Filter Invalid / Empty Records
-# ============================================================
-
-def valid_patient(patient):
-
-    return (
-        "visits" in patient
-        and len(patient["visits"]) > 0
-        and "labels" in patient
-    )
-
-
-train_dataset = [
-    p for p in train_dataset
-    if valid_patient(p)
-]
-
-val_dataset = [
-    p for p in val_dataset
-    if valid_patient(p)
-]
-
-test_dataset = [
-    p for p in test_dataset
-    if valid_patient(p)
-]
-
-halo_dataset = [
-    p for p in halo_dataset
-    if valid_patient(p)
-]
-
-
-# ============================================================
-# Downstream Diagnosis Model
-# ============================================================
 
 class DiagnosisModel(nn.Module):
-
-    def __init__(self):
-
-        super().__init__()
-
-        # Code embedding
-        self.embedding = nn.Linear(
-            5053, #match our code vocab size
-            64
-        )
-
-        # Bidirectional LSTM
-        self.lstm = nn.LSTM(
-            input_size=64,
-            hidden_size=32,
-            num_layers=2,
-            batch_first=True,
-            bidirectional=True,
-            dropout=0.5
-        )
-
-        # Classification layer
-        self.fc = nn.Linear(
-            32 * 2,
-            1
-        )
-
-        self.sigmoid = nn.Sigmoid()
-
-
-    def forward(self, x):
-
-        # x:
-        # [batch, visits, code_vocab_size]
-
-        x = self.embedding(x)
-
-        # [batch, visits, 64]
-
-        output, (hidden, cell) = self.lstm(x)
-
-        # Take final forward + backward hidden states
-        forward_hidden = hidden[-2]
-        backward_hidden = hidden[-1]
-
-        hidden_state = torch.cat(
-            (forward_hidden, backward_hidden),
-            dim=1
-        )
-
-        output = self.fc(hidden_state)
-
-        output = self.sigmoid(output)
-
-        return output.squeeze(1)
-
-
-# ============================================================
-# Convert Patients to Model Input
-# ============================================================
-
-def create_batch(dataset):
-
-    batch_size = len(dataset)
-
-    batch_ehr = np.zeros(
-        (
-            batch_size,
-            config.n_ctx,
-            5053
-        ),
-        dtype=np.float32
-    )
-
-    for i, patient in enumerate(dataset):
-
-        visits = patient["visits"]
-
-        # Limit number of visits to model context
-        visits = visits[:config.n_ctx]
-
-        for j, visit in enumerate(visits):
-
-            for code in visit:
-
-                if (
-                    0 <= code
-                    < 5053
-                ):
-
-                    batch_ehr[i, j, code] = 1.0
-
-    return torch.tensor(
-        batch_ehr,
-        dtype=torch.float32,
-        device=DEVICE
-    )
-
-
-# ============================================================
-# Get Labels
-# ============================================================
-
-def get_labels(dataset, label_index):
-
-    labels = []
-
-    for patient in dataset:
-
-        labels.append(
-            patient["labels"][label_index]
-        )
-
-    return np.array(
-        labels,
-        dtype=np.float32
-    )
-
-
-# ============================================================
-# Balance Dataset for a Disease Label
-# ============================================================
-
-def create_balanced_dataset(
-    dataset,
-    label_index,
-    target_size=5000
-):
-
-    positives = []
-    negatives = []
-
-    for patient in dataset:
-
-        label = patient["labels"][label_index]
-
-        if label == 1:
-            positives.append(patient)
-        else:
-            negatives.append(patient)
-
-    if len(positives) == 0 or len(negatives) == 0:
-
-        return None
-
-    # Sample equal number of positive and negative examples
-    half = target_size // 2
-
-    positive_sample = random.choices(
-        positives,
-        k=half
-    )
-
-    negative_sample = random.choices(
-        negatives,
-        k=half
-    )
-
-    balanced = (
-        positive_sample
-        + negative_sample
-    )
-
-    random.shuffle(balanced)
-
-    return balanced
-
-
-# ============================================================
-# Train Diagnosis Model
-# ============================================================
-
-def train_model(
-    training_data,
-    validation_data,
-    label_index
-):
-
-    model = DiagnosisModel().to(DEVICE)
-
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=LEARNING_RATE
-    )
-
-    criterion = nn.BCELoss()
-
-    best_val_loss = float("inf")
-
-    best_state = None
-
-    for epoch in range(NUM_EPOCHS):
-
-        model.train()
-
-        random.shuffle(training_data)
-
-        total_train_loss = 0
-        num_batches = 0
-
-        for start in range(
-            0,
-            len(training_data),
-            BATCH_SIZE
-        ):
-
-            batch = training_data[
-                start:start + BATCH_SIZE
-            ]
-
-            if len(batch) == 0:
-                continue
-
-            x = create_batch(batch)
-
-            y = torch.tensor(
-                get_labels(
-                    batch,
-                    label_index
-                ),
-                dtype=torch.float32,
-                device=DEVICE
+    def __init__(self, config):
+        super(DiagnosisModel, self).__init__()
+        self.embedding = nn.Linear(config.code_vocab_size, EMBEDDING_DIM, bias=False)
+        self.dropout = nn.Dropout(0.5)
+        self.lstm = nn.LSTM(input_size=EMBEDDING_DIM,
+                            hidden_size=LSTM_HIDDEN_DIM,
+                            num_layers=2,
+                            dropout=0.5,
+                            batch_first=True,
+                            bidirectional=True)
+        self.fc = nn.Linear(2*LSTM_HIDDEN_DIM, 1)
+
+    def forward(self, input_visits, lengths):
+        visit_emb = self.embedding(input_visits)
+        visit_emb = self.dropout(visit_emb)
+        packed_input = pack_padded_sequence(visit_emb, lengths, batch_first=True, enforce_sorted=False)
+        packed_output, _ = self.lstm(packed_input)
+        output, _ = pad_packed_sequence(packed_output, batch_first=True)
+
+        out_forward = output[range(len(output)), lengths - 1, :LSTM_HIDDEN_DIM]
+        out_reverse = output[:, 0, LSTM_HIDDEN_DIM:]
+        out_combined = torch.cat((out_forward, out_reverse), 1)
+
+        patient_embedding = self.fc(out_combined)
+        patient_embedding = torch.squeeze(patient_embedding, 1)
+        prob = torch.sigmoid(patient_embedding)
+        
+        return prob
+
+
+def get_batch(ehr_dataset, loc, batch_size, label_idx):
+    ehr = ehr_dataset[loc:loc+batch_size]
+    batch_ehr = np.zeros((len(ehr), config.n_ctx, config.code_vocab_size))
+    batch_labels = np.array([p['labels'][label_idx] for p in ehr])
+    batch_lens = np.zeros(len(ehr))
+
+    for i, p in enumerate(ehr):
+        visits = p['visits']
+        batch_lens[i] = len(visits)
+
+        for j, v in enumerate(visits):
+            batch_ehr[i,j][v] = 1
+
+    return batch_ehr, batch_labels, batch_lens
+
+
+def train_model(model, train_dataset, val_dataset, save_name, label_idx):
+    global_loss = 1e10
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    bce = nn.BCELoss()
+
+    for e in range(EPOCHS):
+        np.random.shuffle(train_dataset)
+        train_losses = []
+
+        for i in range(0, len(train_dataset), BATCH_SIZE):
+            model.train()
+
+            batch_ehr, batch_labels, batch_lens = get_batch(
+                train_dataset,
+                i,
+                BATCH_SIZE,
+                label_idx
             )
+
+            batch_ehr = torch.tensor(
+                batch_ehr,
+                dtype=torch.float32
+            ).to(device)
+
+            batch_labels = torch.tensor(
+                batch_labels,
+                dtype=torch.float32
+            ).to(device)
 
             optimizer.zero_grad()
 
-            predictions = model(x)
+            prob = model(
+                batch_ehr,
+                batch_lens
+            )
 
-            loss = criterion(
-                predictions,
-                y
+            loss = bce(
+                prob,
+                batch_labels
+            )
+
+            train_losses.append(
+                loss.cpu().detach().numpy()
             )
 
             loss.backward()
-
             optimizer.step()
 
-            total_train_loss += loss.item()
+        cur_train_loss = np.mean(train_losses)
 
-            num_batches += 1
-
-        # ----------------------------------------------------
-        # Validation
-        # ----------------------------------------------------
+        print(
+            "Epoch %d Training Loss:%.5f"
+            % (e, cur_train_loss)
+        )
 
         model.eval()
 
-        validation_loss = 0
-        validation_batches = 0
-
         with torch.no_grad():
 
-            for start in range(
+            val_losses = []
+
+            for v_i in range(
                 0,
-                len(validation_data),
+                len(val_dataset),
                 BATCH_SIZE
             ):
 
-                batch = validation_data[
-                    start:start + BATCH_SIZE
-                ]
-
-                x = create_batch(batch)
-
-                y = torch.tensor(
-                    get_labels(
-                        batch,
-                        label_index
-                    ),
-                    dtype=torch.float32,
-                    device=DEVICE
+                batch_ehr, batch_labels, batch_lens = get_batch(
+                    val_dataset,
+                    v_i,
+                    BATCH_SIZE,
+                    label_idx
                 )
 
-                predictions = model(x)
+                batch_ehr = torch.tensor(
+                    batch_ehr,
+                    dtype=torch.float32
+                ).to(device)
 
-                loss = criterion(
-                    predictions,
-                    y
+                batch_labels = torch.tensor(
+                    batch_labels,
+                    dtype=torch.float32
+                ).to(device)
+
+                prob = model(
+                    batch_ehr,
+                    batch_lens
                 )
 
-                validation_loss += loss.item()
+                val_loss = bce(
+                    prob,
+                    batch_labels
+                )
 
-                validation_batches += 1
+                val_losses.append(
+                    val_loss.cpu().detach().numpy()
+                )
 
-        avg_train_loss = (
-            total_train_loss / num_batches
-            if num_batches > 0
-            else 0
-        )
+            cur_val_loss = np.mean(val_losses)
 
-        avg_val_loss = (
-            validation_loss / validation_batches
-            if validation_batches > 0
-            else 0
-        )
+            print(
+                "Epoch %d Validation Loss:%.5f"
+                % (e, cur_val_loss)
+            )
 
-        if avg_val_loss < best_val_loss:
+            if cur_val_loss < global_loss:
 
-            best_val_loss = avg_val_loss
+                global_loss = cur_val_loss
 
-            best_state = {
-                key: value.cpu().clone()
-                for key, value
-                in model.state_dict().items()
-            }
+                state = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict()
+                }
 
-        print(
-            f"Label {label_index} | "
-            f"Epoch {epoch + 1}/{NUM_EPOCHS} | "
-            f"Train Loss: {avg_train_loss:.5f} | "
-            f"Val Loss: {avg_val_loss:.5f}"
-        )
+                torch.save(
+                    state,
+                    f'./save/{save_name}'
+                )
 
-    if best_state is not None:
+                print(
+                    '------------ Save best model ------------'
+                )
 
-        model.load_state_dict(best_state)
-
-    return model
+    model.load_state_dict(state['model'])
 
 
-# ============================================================
-# Evaluate Model
-# ============================================================
+def test_model(model, test_dataset, label_idx):
 
-def evaluate_model(
-    model,
-    test_data,
-    label_index
-):
+    loss_list = []
+    pred_list = []
+    true_list = []
+
+    bce = nn.BCELoss()
 
     model.eval()
 
-    all_predictions = []
-    all_labels = []
-
     with torch.no_grad():
 
-        for start in range(
+        for i in range(
             0,
-            len(test_data),
+            len(test_dataset),
             BATCH_SIZE
         ):
 
-            batch = test_data[
-                start:start + BATCH_SIZE
-            ]
-
-            x = create_batch(batch)
-
-            predictions = model(x)
-
-            all_predictions.extend(
-                predictions.cpu().numpy()
+            batch_ehr, batch_labels, batch_lens = get_batch(
+                test_dataset,
+                i,
+                BATCH_SIZE,
+                label_idx
             )
 
-            all_labels.extend(
-                get_labels(
-                    batch,
-                    label_index
-                )
+            batch_ehr = torch.tensor(
+                batch_ehr,
+                dtype=torch.float32
+            ).to(device)
+
+            batch_labels = torch.tensor(
+                batch_labels,
+                dtype=torch.float32
+            ).to(device)
+
+            prob = model(
+                batch_ehr,
+                batch_lens
             )
 
-    all_predictions = np.array(
-        all_predictions
+            val_loss = bce(
+                prob,
+                batch_labels
+            )
+
+            loss_list.append(
+                val_loss.cpu().detach().numpy()
+            )
+
+            pred_list += list(
+                prob.cpu().detach().numpy()
+            )
+
+            true_list += list(
+                batch_labels.cpu().detach().numpy()
+            )
+
+    round_list = np.around(pred_list)
+
+    # Extract, save, and display test metrics
+    avg_loss = np.mean(loss_list)
+
+    cmatrix = metrics.confusion_matrix(
+        true_list,
+        round_list
     )
 
-    all_labels = np.array(
-        all_labels
+    acc = metrics.accuracy_score(
+        true_list,
+        round_list
     )
 
-    # --------------------------------------------------------
-    # AUROC
-    # --------------------------------------------------------
+    prc = metrics.precision_score(
+        true_list,
+        round_list
+    )
 
-    if len(np.unique(all_labels)) > 1:
+    rec = metrics.recall_score(
+        true_list,
+        round_list
+    )
 
-        auroc = roc_auc_score(
-            all_labels,
-            all_predictions
+    f1 = metrics.f1_score(
+        true_list,
+        round_list
+    )
+
+    auroc = metrics.roc_auc_score(
+        true_list,
+        pred_list
+    )
+
+    (precisions, recalls, _) = metrics.precision_recall_curve(
+        true_list,
+        pred_list
+    )
+
+    auprc = metrics.auc(
+        recalls,
+        precisions
+    )
+
+    metrics_dict = {}
+
+    metrics_dict['Test Loss'] = avg_loss
+    metrics_dict['Confusion Matrix'] = cmatrix
+    metrics_dict['Accuracy'] = acc
+    metrics_dict['Precision'] = prc
+    metrics_dict['Recall'] = rec
+    metrics_dict['F1 Score'] = f1
+    metrics_dict['AUROC'] = auroc
+    metrics_dict['AUPRC'] = auprc
+
+    print('Test Loss: ', avg_loss)
+    print('Confusion Matrix: ', cmatrix)
+    print('Accuracy: ', acc)
+    print('Precision: ', prc)
+    print('Recall: ', rec)
+    print('F1 Score: ', f1)
+    print('AUROC: ', auroc)
+    print('AUPRC: ', auprc)
+    print("\n")
+
+    return metrics_dict
+
+
+results = {}
+
+for i in LABEL_IDX_LIST:
+
+    label_results = {}
+
+    # Prepare datasets
+    halo_pos_label_dataset = [
+        p for p in halo_ehr_dataset
+        if p['labels'][i] == 1
+    ]
+
+    halo_neg_label_dataset = [
+        p for p in halo_ehr_dataset
+        if p['labels'][i] == 0
+    ]
+
+    train_pos_label_dataset = [
+        p for p in train_ehr_dataset
+        if p['labels'][i] == 1
+    ]
+
+    train_neg_label_dataset = [
+        p for p in train_ehr_dataset
+        if p['labels'][i] == 0
+    ]
+
+    val_pos_label_dataset = [
+        p for p in val_ehr_dataset
+        if p['labels'][i] == 1
+    ]
+
+    val_neg_label_dataset = [
+        p for p in val_ehr_dataset
+        if p['labels'][i] == 0
+    ]
+
+    test_pos_label_dataset = [
+        p for p in test_ehr_dataset
+        if p['labels'][i] == 1
+    ]
+
+    test_neg_label_dataset = [
+        p for p in test_ehr_dataset
+        if p['labels'][i] == 0
+    ]
+
+    val_dataset = list(
+        np.random.choice(
+            val_pos_label_dataset,
+            int(NUM_VAL_EXAMPLES/2),
+            replace=(
+                False
+                if len(val_pos_label_dataset) >= NUM_VAL_EXAMPLES
+                else True
+            )
         )
-
-    else:
-
-        auroc = np.nan
-
-
-    # --------------------------------------------------------
-    # AUPRC
-    # --------------------------------------------------------
-
-    if np.sum(all_labels) > 0:
-
-        auprc = average_precision_score(
-            all_labels,
-            all_predictions
+    ) + list(
+        np.random.choice(
+            val_neg_label_dataset,
+            int(NUM_VAL_EXAMPLES/2),
+            replace=False
         )
-
-    else:
-
-        auprc = np.nan
-
-
-    # --------------------------------------------------------
-    # F1
-    # --------------------------------------------------------
-
-    binary_predictions = (
-        all_predictions >= 0.5
-    ).astype(int)
-
-    f1 = f1_score(
-        all_labels,
-        binary_predictions,
-        zero_division=0
     )
 
-    return auroc, auprc, f1
-
-
-# ============================================================
-# Run Downstream Experiment
-# ============================================================
-
-results = {
-    "real": [],
-    "halo": []
-}
-
-
-for label_index in range(NUM_LABELS):
-
-    print("\n" + "=" * 60)
-
-    print(
-        f"DOWNSTREAM TASK - LABEL {label_index + 1}"
-    )
-
-    print("=" * 60)
-
-
-    # ========================================================
-    # REAL DATA
-    # ========================================================
-
-    print("\nTraining on REAL data...")
-
-    real_training_data = create_balanced_dataset(
-        train_dataset,
-        label_index
-    )
-
-    if real_training_data is None:
-
-        print(
-            "Skipping label because it does "
-            "not contain both classes."
+    test_dataset = list(
+        np.random.choice(
+            test_pos_label_dataset,
+            int(NUM_TEST_EXAMPLES/2),
+            replace=(
+                False
+                if len(test_pos_label_dataset) >= NUM_TEST_EXAMPLES
+                else True
+            )
         )
+    ) + list(
+        np.random.choice(
+            test_neg_label_dataset,
+            int(NUM_TEST_EXAMPLES/2),
+            replace=False
+        )
+    )
 
-        continue
+    train_dataset_real = list(
+        np.random.choice(
+            train_pos_label_dataset,
+            int(NUM_TRAIN_EXAMPLES/2),
+            replace=(
+                False
+                if len(test_pos_label_dataset) >= int(NUM_TRAIN_EXAMPLES/2)
+                else True
+            )
+        )
+    ) + list(
+        np.random.choice(
+            train_neg_label_dataset,
+            int(NUM_TRAIN_EXAMPLES/2),
+            replace=False
+        )
+    )
 
-    real_model = train_model(
-        real_training_data,
+    train_dataset_halo = list(
+        np.random.choice(
+            halo_pos_label_dataset,
+            int(NUM_TRAIN_EXAMPLES/2),
+            replace=(
+                False
+                if len(halo_pos_label_dataset) >= int(NUM_TRAIN_EXAMPLES/2)
+                else True
+            )
+        )
+    ) + list(
+        np.random.choice(
+            halo_neg_label_dataset,
+            int(NUM_TRAIN_EXAMPLES/2),
+            replace=False
+        )
+    )
+
+    # Perform the different experiments
+
+    model_real = DiagnosisModel(config).to(device)
+
+    train_model(
+        model_real,
+        train_dataset_real,
         val_dataset,
-        label_index
+        f"syn_diag_Real_{i}",
+        i
     )
 
-    real_auroc, real_auprc, real_f1 = evaluate_model(
-        real_model,
+    state = torch.load(
+        f'./save/syn_diag_Real_{i}'
+    )
+
+    model_real.load_state_dict(
+        state['model']
+    )
+
+    test_results_real = test_model(
+        model_real,
         test_dataset,
-        label_index
+        i
     )
 
-    print(
-        f"REAL | "
-        f"AUROC: {real_auroc:.4f} | "
-        f"AUPRC: {real_auprc:.4f} | "
-        f"F1: {real_f1:.4f}"
-    )
+    label_results[f'Real'] = test_results_real
 
 
-    # ========================================================
-    # HALO SYNTHETIC DATA
-    # ========================================================
+    model_halo = DiagnosisModel(config).to(device)
 
-    print("\nTraining on HALO synthetic data...")
-
-    halo_training_data = create_balanced_dataset(
-        halo_dataset,
-        label_index
-    )
-
-    if halo_training_data is None:
-
-        print(
-            "Skipping HALO label because it does "
-            "not contain both classes."
-        )
-
-        continue
-
-    halo_model = train_model(
-        halo_training_data,
+    train_model(
+        model_halo,
+        train_dataset_halo,
         val_dataset,
-        label_index
+        f"syn_diag_HALO_{i}",
+        i
     )
 
-    halo_auroc, halo_auprc, halo_f1 = evaluate_model(
-        halo_model,
+    state = torch.load(
+        f'./save/syn_diag_HALO_{i}'
+    )
+
+    model_halo.load_state_dict(
+        state['model']
+    )
+
+    test_results_halo = test_model(
+        model_halo,
         test_dataset,
-        label_index
+        i
     )
 
-    print(
-        f"HALO | "
-        f"AUROC: {halo_auroc:.4f} | "
-        f"AUPRC: {halo_auprc:.4f} | "
-        f"F1: {halo_f1:.4f}"
+    label_results[f'HALO'] = test_results_halo
+
+
+    results[index_to_code[i]] = label_results
+
+
+pickle.dump(
+    results,
+    open(
+        f"results/synthetic_training_stats/fully_synthetic_stats.pkl",
+        "wb"
     )
-
-
-    # ========================================================
-    # Save Results
-    # ========================================================
-
-    results["real"].append({
-        "label": label_index,
-        "AUROC": real_auroc,
-        "AUPRC": real_auprc,
-        "F1": real_f1
-    })
-
-    results["halo"].append({
-        "label": label_index,
-        "AUROC": halo_auroc,
-        "AUPRC": halo_auprc,
-        "F1": halo_f1
-    })
-
-
-# ============================================================
-# Save Final Results
-# ============================================================
-
-os.makedirs(
-    "./results/synthetic_training_stats",
-    exist_ok=True
 )
-
-output_file = (
-    "./results/synthetic_training_stats/"
-    "halo_downstream_results.pkl"
-)
-
-with open(output_file, "wb") as f:
-
-    pickle.dump(
-        results,
-        f
-    )
-
-
-# ============================================================
-# Print Summary
-# ============================================================
-
-print("\n")
-print("=" * 70)
-print("FINAL DOWNSTREAM RESULTS")
-print("=" * 70)
-
-print(
-    f"{'Dataset':<15}"
-    f"{'AUROC':<15}"
-    f"{'AUPRC':<15}"
-    f"{'F1':<15}"
-)
-
-print("-" * 70)
-
-
-real_results = results["real"]
-halo_results = results["halo"]
-
-if len(real_results) > 0:
-
-    real_auroc = np.nanmean([
-        x["AUROC"]
-        for x in real_results
-    ])
-
-    real_auprc = np.nanmean([
-        x["AUPRC"]
-        for x in real_results
-    ])
-
-    real_f1 = np.nanmean([
-        x["F1"]
-        for x in real_results
-    ])
-
-    print(
-        f"{'REAL':<15}"
-        f"{real_auroc:<15.4f}"
-        f"{real_auprc:<15.4f}"
-        f"{real_f1:<15.4f}"
-    )
-
-
-if len(halo_results) > 0:
-
-    halo_auroc = np.nanmean([
-        x["AUROC"]
-        for x in halo_results
-    ])
-
-    halo_auprc = np.nanmean([
-        x["AUPRC"]
-        for x in halo_results
-    ])
-
-    halo_f1 = np.nanmean([
-        x["F1"]
-        for x in halo_results
-    ])
-
-    print(
-        f"{'HALO':<15}"
-        f"{halo_auroc:<15.4f}"
-        f"{halo_auprc:<15.4f}"
-        f"{halo_f1:<15.4f}"
-    )
-
-
-print("\nResults saved to:")
-print(output_file)
