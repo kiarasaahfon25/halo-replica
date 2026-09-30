@@ -124,7 +124,7 @@ class DiagnosisModel(nn.Module):
 
         # Code embedding
         self.embedding = nn.Linear(
-            config.code_vocab_size,
+            5053, #match our code vocab size
             64
         )
 
@@ -186,7 +186,7 @@ def create_batch(dataset):
         (
             batch_size,
             config.n_ctx,
-            config.code_vocab_size
+            5053
         ),
         dtype=np.float32
     )
@@ -204,7 +204,7 @@ def create_batch(dataset):
 
                 if (
                     0 <= code
-                    < config.code_vocab_size
+                    < 5053
                 ):
 
                     batch_ehr[i, j, code] = 1.0
