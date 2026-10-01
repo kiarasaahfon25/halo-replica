@@ -8,17 +8,30 @@ from sklearn.model_selection import train_test_split
 mimic_dir = "/fs02/datasets/MIMIC-III/physionet.org/files/mimic3-carevue/1.4/"
 admissionFile = mimic_dir + "ADMISSIONS.csv.gz"
 diagnosisFile = mimic_dir + "DIAGNOSES_ICD.csv.gz"
+patientFile = mimic_dir + "PATIENTS.csv.gz"
 
 print("Loading CSVs Into Dataframes")
+#admissions
 admissionDf = pd.read_csv(admissionFile, dtype=str)
-
 admissionDf['admittime'] = pd.to_datetime(admissionDf['admittime']) #covert column into python datetime
 admissionDf = admissionDf.sort_values('admittime') #oldest to newest
 admissionDf = admissionDf.reset_index(drop=True) 
+
+#diagnosis 
 diagnosisDf = pd.read_csv(diagnosisFile, dtype=str).set_index("hadm_id")
 diagnosisDf = diagnosisDf[diagnosisDf['icd9_code'].notnull()] #remove diagnoses without an ICD9_Code
 diagnosisDf = diagnosisDf[['icd9_code']]
 
+#patients
+patientDf = pd.read_csv(patientFile, dtype=str)
+patientDf['dob'] = pd.to_datetime(patientDf['dob']) #convert date of birth into python datetime
+patientDf = patientDf.set_index('subject_id')
+
+#calculate patient age
+def calculate_age(dob, admittime):
+    age = admittime.year - dob.year
+
+    return age
 '''
 #limiting records for easier run on laptop
 admissionDf = admissionDf.head()
@@ -43,9 +56,12 @@ for row in tqdm(admissionDf.itertuples(), total=admissionDf.shape[0]):
     
     # Building the hospital admission data point
     if subject_id not in data:
-      data[subject_id] = {'visits': [diagnoses]} #create initial visit (new patient)
+      data[subject_id] = {
+         'visits': [diagnoses],
+         'admittimes': [row.admittime]} #create initial visit (new patient)
     else:
       data[subject_id]['visits'].append(diagnoses) #add subsequent visits (same patient)
+      data[subject_id]['admittimes'].append(row.admittime)
 
 code_to_index = {} #dictionary
 
@@ -67,6 +83,15 @@ print(f"VOCAB SIZE: {len(code_to_index)}")
 
 #reverse dictionary to show index, codex
 index_to_code = {v: k for k, v in code_to_index.items()}
+
+# Calculate age at the patient's last recorded admission
+for subject_id, patient in data.items():
+    dob = patientDf.loc[subject_id, 'dob']
+    last_admittime = patient['admittimes'][-1] #since admissions are sorted from oldest to newest
+    patient['last_age'] = calculate_age(dob, last_admittime)
+
+    del patient['admittimes']
+
 
 data = list(data.values()) #removes subject ids 
 
