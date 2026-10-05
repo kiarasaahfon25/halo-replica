@@ -424,6 +424,8 @@ def test_model(model, test_dataset, label_idx):
     metrics_dict['AUROC'] = auroc
     metrics_dict['AUPRC'] = auprc
     metrics_dict['Age F1 Score'] = age_f1
+    metrics_dict['Gender F1 Score'] = gender_f1
+
 
 
     print('Test Loss: ', avg_loss)
