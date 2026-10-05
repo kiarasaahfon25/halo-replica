@@ -245,6 +245,7 @@ def test_model(model, test_dataset, label_idx):
     pred_list = []
     true_list = []
     age_list = []
+    gender_list = []
 
     bce = nn.BCELoss()
 
@@ -297,6 +298,7 @@ def test_model(model, test_dataset, label_idx):
                 batch_labels.cpu().detach().numpy()
             )
             age_list += [p['last_age'] for p in test_dataset[i:i+BATCH_SIZE]]
+            gender_list += [p['gender'] for p in test_dataset[i:i+BATCH_SIZE]]
    
 
 
@@ -366,6 +368,35 @@ def test_model(model, test_dataset, label_idx):
             f"Age {age_bin} - N: {len(patients)}, "
             f"F1: {age_f1[age_bin]:.4f}"
         )
+    gender_groups = {
+    "F": [],
+    "M": []
+    }
+    
+    for gender, true, pred in zip(gender_list, true_list, round_list):
+        if gender in gender_groups:
+            gender_groups[gender].append((true, pred))
+
+    gender_f1 = {}
+
+    for gender, patients in gender_groups.items():
+        if len(patients) == 0:
+            gender_f1[gender] = None
+            continue
+
+        gender_true = [x[0] for x in patients]
+        gender_pred = [x[1] for x in patients]
+
+        gender_f1[gender] = metrics.f1_score(
+            gender_true,
+            gender_pred,
+            zero_division=0
+        )
+
+        print(
+            f"Gender {gender} - N: {len(patients)}, "
+            f"F1: {gender_f1[gender]:.4f}"
+        )      
 
     auroc = metrics.roc_auc_score(
         true_list,

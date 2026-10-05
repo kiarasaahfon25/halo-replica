@@ -89,6 +89,8 @@ for subject_id, patient in data.items():
     dob = patientDf.loc[subject_id, 'dob']
     last_admittime = patient['admittimes'][-1] #since admissions are sorted from oldest to newest
     patient['last_age'] = calculate_age(dob, last_admittime)
+    patient['gender'] = patientDf.loc[subject_id, 'gender']
+
 
     del patient['admittimes']
 
