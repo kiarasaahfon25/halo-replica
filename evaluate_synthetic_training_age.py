@@ -399,8 +399,8 @@ def test_model(model, test_dataset, label_idx):
 
         print(
             f"Gender {gender} - N: {len(patients)}, "
-            f"Actual positives: {sum(age_true)}, "
-            f"Predicted positives: {sum(age_pred)}, "
+            f"Actual positives: {sum(gender_true)}, "
+            f"Predicted positives: {sum(gender_pred)}, "
             f"F1: {gender_f1[gender]:.4f}"
         )      
 
