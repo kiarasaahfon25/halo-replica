@@ -358,6 +358,8 @@ def test_model(model, test_dataset, label_idx):
         age_true = [x[0] for x in patients]
         age_pred = [x[1] for x in patients]
 
+        
+
         age_f1[age_bin] = metrics.f1_score(
             age_true,
             age_pred,
@@ -366,6 +368,8 @@ def test_model(model, test_dataset, label_idx):
 
         print(
             f"Age {age_bin} - N: {len(patients)}, "
+            f"Actual positives: {sum(age_true)}, "
+            f"Predicted positives: {sum(age_pred)}, "
             f"F1: {age_f1[age_bin]:.4f}"
         )
     gender_groups = {
@@ -395,6 +399,8 @@ def test_model(model, test_dataset, label_idx):
 
         print(
             f"Gender {gender} - N: {len(patients)}, "
+            f"Actual positives: {sum(age_true)}, "
+            f"Predicted positives: {sum(age_pred)}, "
             f"F1: {gender_f1[gender]:.4f}"
         )      
 
